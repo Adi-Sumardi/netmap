@@ -1,0 +1,45 @@
+# One origin for the whole app (rules/security.md):
+#   /                         -> Next.js
+#   /api /auth /sanctum ...   -> Laravel
+#   /app                      -> Reverb (WebSocket)
+#   /stream                   -> go2rtc, only for signed-in users (Tahap 3)
+
+{$NETMAP_DOMAIN} {
+	# Default: Caddy's internal CA. Install its root cert on admin PCs, or switch to
+	# Let's Encrypt DNS-01 with a Caddy build that includes your DNS provider plugin:
+	#   tls { dns cloudflare {env.CLOUDFLARE_API_TOKEN} }
+	tls internal
+
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Frame-Options "DENY"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "same-origin"
+		Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://*.googleusercontent.com; font-src 'self'; connect-src 'self' wss://{$NETMAP_DOMAIN}; media-src 'self' blob:; frame-ancestors 'none'"
+		-Server
+	}
+
+	@laravel path /api/* /auth/* /sanctum/* /broadcasting/* /webhook/* /up
+	handle @laravel {
+		reverse_proxy backend:8000
+	}
+
+	handle /app/* {
+		reverse_proxy reverb:8080
+	}
+
+	# Tahap 3: enable once GET /api/v1/stream-auth exists.
+	# handle_path /stream/* {
+	# 	forward_auth backend:8000 {
+	# 		uri /api/v1/stream-auth
+	# 		copy_headers Cookie
+	# 	}
+	# 	reverse_proxy go2rtc:1984
+	# }
+
+	handle {
+		reverse_proxy frontend:3000
+	}
+}

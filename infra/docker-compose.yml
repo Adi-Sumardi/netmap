@@ -1,0 +1,120 @@
+# NetMap on the mini PC. Usage (from this folder):
+#   cp .env.example .env && cp ../backend/.env.example ../backend/.env.production   # then fill both
+#   docker compose up -d --build
+#   docker compose exec backend php artisan migrate --force --seed
+#
+# Only Caddy (80/443) and go2rtc WebRTC (8555) are published. Everything else stays on the internal network.
+
+name: netmap
+
+x-backend: &backend
+  build:
+    context: ../backend
+    dockerfile: ../infra/backend.Dockerfile
+  image: netmap-backend
+  restart: unless-stopped
+  env_file: ../backend/.env.production
+  environment:
+    APP_ENV: production
+    APP_DEBUG: "false"
+    APP_URL: https://${NETMAP_DOMAIN}
+    NETMAP_FRONTEND_URL: https://${NETMAP_DOMAIN}
+    GOOGLE_REDIRECT_URI: https://${NETMAP_DOMAIN}/auth/google/callback
+    SANCTUM_STATEFUL_DOMAINS: ${NETMAP_DOMAIN}
+    DB_CONNECTION: pgsql
+    DB_HOST: postgres
+    DB_PORT: "5432"
+    DB_DATABASE: netmap
+    DB_USERNAME: netmap
+    DB_PASSWORD: ${POSTGRES_PASSWORD}
+    REDIS_HOST: redis
+    QUEUE_CONNECTION: redis
+    CACHE_STORE: redis
+    SESSION_DRIVER: database
+    SESSION_SECURE_COOKIE: "true"
+    BROADCAST_CONNECTION: reverb
+    REVERB_HOST: reverb
+    REVERB_PORT: "8080"
+    REVERB_SCHEME: http
+  volumes:
+    - backend-storage:/app/storage
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_started
+
+services:
+  caddy:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      NETMAP_DOMAIN: ${NETMAP_DOMAIN}
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on: [backend, frontend, reverb]
+
+  frontend:
+    build:
+      context: ../frontend
+      dockerfile: ../infra/frontend.Dockerfile
+    image: netmap-frontend
+    restart: unless-stopped
+
+  backend:
+    <<: *backend
+
+  queue:
+    <<: *backend
+    command: ["php", "artisan", "queue:work", "--tries=3", "--max-time=3600"]
+
+  scheduler:
+    <<: *backend
+    command: ["php", "artisan", "schedule:work"]
+
+  reverb:
+    <<: *backend
+    command: ["php", "artisan", "reverb:start", "--host=0.0.0.0", "--port=8080"]
+
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: netmap
+      POSTGRES_USER: netmap
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./backups:/backups
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U netmap -d netmap"]
+      interval: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redis-data:/data
+
+  # Tahap 3 (Live CCTV). The API (1984) is only reachable inside this network, through Caddy.
+  go2rtc:
+    image: alexxit/go2rtc:1.9.9
+    restart: unless-stopped
+    ports:
+      - "8555:8555/tcp"
+      - "8555:8555/udp"
+    volumes:
+      - ./go2rtc:/config
+
+volumes:
+  postgres-data:
+  redis-data:
+  backend-storage:
+  caddy-data:
+  caddy-config:
